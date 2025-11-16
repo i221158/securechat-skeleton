@@ -1,0 +1,11 @@
+
+# Caches and local files
+__pycache__/
+*.db
+
+# Certificates and keys (NEVER commit secrets)
+certs/
+
+# Environment variables
+.env
+
