@@ -51,7 +51,20 @@ def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
                     success=True,
                     message=f"User {model.username} logged in successfully."
                 )
-                # TODO: Phase 3 (Session Key) will start here
+                # Send the login success message *before* starting Phase 3
+                encrypted_response = aes.encrypt(temp_aes_key, response.model_dump_json().encode('utf-8'))
+                protocol.send_message(conn, encrypted_response)
+                print(f"[Server] Sent encrypted status response (login OK).")
+
+                # Now, perform the Phase 3 session key exchange
+                session_key = handle_session_key_exchange(conn)
+                
+                # TODO: Phase 4 (Chat) will start here, using session_key
+                print("[Server] Ready for encrypted chat.")
+                return # Exit function for now
+                # --------------------------------------------------
+                # --- END OF PHASE 3 CODE ---
+                # --------------------------------------------------
             else:
                 response = protocol.StatusMessage(
                     success=False,
@@ -64,6 +77,14 @@ def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
         print(f"[Server] Error processing credentials: {e}")
         response = protocol.StatusMessage(success=False, message=str(e))
 
+    # 5. Send encrypted response (Req 2.2.7)
+    # This now only runs for registration or failed login
+    
+    # --- ADD THIS 'if' ---
+    if not (data.get('type') == 'login' and response.success):
+        encrypted_response = aes.encrypt(temp_aes_key, response.model_dump_json().encode('utf-8'))
+        protocol.send_message(conn, encrypted_response)
+        print(f"[Server] Sent encrypted status response.")
     # 5. Send encrypted response (Req 2.2.7)
     encrypted_response = aes.encrypt(temp_aes_key, response.model_dump_json().encode('utf-8'))
     protocol.send_message(conn, encrypted_response)
@@ -82,7 +103,8 @@ def handle_temp_dh_exchange(conn: socket.socket) -> bytes:
     if not client_hello_data:
         raise Exception("Client disconnected during DH.")
     
-    client_hello = protocol.DHClientHello(**client_hello_data)
+    # using renamed model
+    client_hello = protocol.TempDHClientHello(**client_hello_data) # <-- RENAMED
     
     # 2. Generate server key and shared secret
     B_y, shared_secret_Ks = dh.get_server_dh_secret(
@@ -90,7 +112,8 @@ def handle_temp_dh_exchange(conn: socket.socket) -> bytes:
     )
     
     # 3. Send server DH hello
-    server_hello = protocol.DHServerHello(B_y=B_y)
+    # using renamed model
+    server_hello = protocol.TempDHServerReply(B_y=B_y) # <-- RENAMED
     protocol.send_json_message(conn, server_hello)
     
     # 4. Derive AES key (K = Trunc16(SHA256(Ks)))
@@ -98,6 +121,33 @@ def handle_temp_dh_exchange(conn: socket.socket) -> bytes:
     print("[Server] Temporary AES key derived.")
     return temp_aes_key
 
+def handle_session_key_exchange(conn: socket.socket) -> bytes:
+    """
+    Performs the FINAL session key DH exchange (Req 2.3).
+    Returns the 16-byte FINAL session AES key.
+    """
+    print("[Server] Starting FINAL session key DH exchange...")
+    
+    # 1. Receive client DH hello (using the new model)
+    client_msg_data = protocol.receive_json_message(conn)
+    if not client_msg_data:
+        raise Exception("Client disconnected during session DH.")
+    
+    client_msg = protocol.DHClient(**client_msg_data)
+    
+    # 2. Generate server key and shared secret
+    B_y, shared_secret_Ks = dh.get_server_dh_secret(
+        client_msg.p, client_msg.g, client_msg.A_y
+    )
+    
+    # 3. Send server DH reply (using the new model)
+    server_reply = protocol.DHServer(B_y=B_y)
+    protocol.send_json_message(conn, server_reply)
+    
+    # 4. Derive FINAL AES key (K = Trunc16(SHA256(Ks)))
+    session_aes_key = dh.derive_aes_key(shared_secret_Ks)
+    print("[Server] FINAL Session AES key derived.")
+    return session_aes_key
 
 def handle_client(conn: socket.socket):
     """

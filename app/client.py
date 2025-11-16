@@ -20,7 +20,8 @@ def perform_temp_dh_exchange(sock: socket.socket) -> bytes:
     client_priv_key, p, g, A_y = dh.generate_client_dh()
     
     # 2. Send client DH hello
-    client_hello = protocol.DHClientHello(p=p, g=g, A_y=A_y)
+    # USE RENAMED MODEL
+    client_hello = protocol.TempDHClientHello(p=p, g=g, A_y=A_y) # <-- RENAMED
     protocol.send_json_message(sock, client_hello)
     
     # 3. Receive server DH hello
@@ -28,7 +29,8 @@ def perform_temp_dh_exchange(sock: socket.socket) -> bytes:
     if not server_hello_data:
         raise Exception("Server disconnected during DH.")
     
-    server_hello = protocol.DHServerHello(**server_hello_data)
+    # USE RENAMED MODEL
+    server_hello = protocol.TempDHServerReply(**server_hello_data) # <-- RENAMED
     
     # 4. Compute shared secret
     shared_secret_Ks = dh.get_client_dh_shared_secret(
@@ -40,11 +42,43 @@ def perform_temp_dh_exchange(sock: socket.socket) -> bytes:
     print("[Client] Temporary AES key derived.")
     return temp_aes_key
 
+def perform_session_key_exchange(sock: socket.socket) -> bytes:
+    """
+    Performs the FINAL session key DH exchange (Req 2.3).
+    Returns the 16-byte FINAL session AES key.
+    """
+    print("[Client] Starting FINAL session key DH exchange...")
+    
+    # 1. Generate client DH values
+    client_priv_key, p, g, A_y = dh.generate_client_dh()
+    
+    # 2. Send client DH hello (using the new model)
+    client_msg = protocol.DHClient(p=p, g=g, A_y=A_y) # [cite: 88]
+    protocol.send_json_message(sock, client_msg)
+    
+    # 3. Receive server DH reply (using the new model)
+    server_reply_data = protocol.receive_json_message(sock)
+    if not server_reply_data:
+        raise Exception("Server disconnected during session DH.")
+    
+    server_reply = protocol.DHServer(**server_reply_data) # [cite: 91]
+    
+    # 4. Compute shared secret
+    shared_secret_Ks = dh.get_client_dh_shared_secret(
+        p, g, server_reply.B_y, client_priv_key
+    )
+    
+    # 5. Derive FINAL AES key (K = Trunc16(SHA256(Ks)))
+    session_aes_key = dh.derive_aes_key(shared_secret_Ks) # [cite: 197]
+    print("[Client] FINAL Session AES key derived.")
+    return session_aes_key
+
 def main():
     """Client main logic."""
     HOST = 'localhost' 
     PORT = 12345       
     temp_aes_key = None
+    action = "" # Define action here to access it in the final 'if'
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -83,7 +117,6 @@ def main():
             temp_aes_key = perform_temp_dh_exchange(s)
             
             # 2. Get user action (register or login)
-            action = ""
             while action not in ['r', 'l']:
                 action = input("Do you want to (r)egister or (l)ogin? ").strip().lower()
 
@@ -115,8 +148,17 @@ def main():
             status_data = json.loads(decrypted_response_bytes.decode('utf-8'))
             response = protocol.StatusMessage(**status_data)
             
+            # --- Check Response and Start Phase 3 ---
             if response.success:
                 print(f"[Client] Success: {response.message}")
+                
+                # If we just logged in, we must now do the Phase 3 exchange
+                if action == 'l':
+                    session_key = perform_session_key_exchange(s)
+                    
+                    # TODO: Phase 4 (Chat) will start here
+                    print("[Client] Ready for encrypted chat.")
+
             else:
                 print(f"[Client] Failure: {response.message}")
 
@@ -134,7 +176,6 @@ def main():
                 decrypted_response_bytes = aes.decrypt(temp_aes_key, e.args[0])
                 print(f"[Client] Received encrypted error: {decrypted_response_bytes.decode('utf-8')}")
              except:
-                pass # Just print the original exception
-
+                pass # Just print the original exception  
 if __name__ == "__main__":
     main()

@@ -18,23 +18,42 @@ class ErrorMessage(BaseModel):
 
 # Models for Step 2B: Secure Credentials (Req 2.2)
 
-class DHClientHello(BaseModel):
+class TempDHClientHello(BaseModel):
     """
     Client -> Server message for temporary DH exchange.
     Contains the client's public parameters p, g, and public value A.
     """
-    type: str = "dh_hello"
+    type: str = "temp_dh_hello"
     p: int
     g: int
     A_y: int
 
-class DHServerHello(BaseModel):
+class TempDHServerReply(BaseModel):
     """
     Server -> Client response for temporary DH exchange.
     Contains the server's public value B.
     """
-    type: str = "dh_reply"
+    type: str = "temp_dh_reply"
     B_y: int
+
+
+class DHClient(BaseModel):
+    """
+    Client -> Server message for FINAL session key (Req 2.3 / Sec 1.2).
+    Contains p, g, and public value A.
+    """
+    type: str = "dh_client" 
+    p: int
+    g: int
+    A_y: int 
+
+class DHServer(BaseModel):
+    """
+    Server -> Client response for FINAL session key (Req 2.3 / Sec 1.2).
+    Contains public value B.
+    """
+    type: str = "dh_server" 
+    B_y: int 
 
 class SecureRegister(BaseModel):
     """
