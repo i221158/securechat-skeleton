@@ -80,6 +80,17 @@ class StatusMessage(BaseModel):
     success: bool
     message: str
 
+    
+class ChatMessage(BaseModel):
+    """
+    Client <-> Server message for an encrypted chat message.
+    Corresponds to "msg" in the spec (Req 2.4.i).
+    """
+    type: str = "msg"
+    seqno: int     # Sequence number (for replay protection)
+    ts: int        # Timestamp (milliseconds)
+    ct: str        # Base64-encoded AES-128 ciphertext
+    sig: str       # Base64-encoded RSA signature
 
 # --- Network Helper Functions (Unchanged) ---
 # (Your existing send_message, receive_message, 
