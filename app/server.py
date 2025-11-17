@@ -5,13 +5,17 @@ Handles mutual auth, temporary DH, and secure credential processing.
 
 import socket
 import json
+import time
+from typing import Union
 from .common import protocol
 from .crypto import pki, dh, aes
-from .storage import db
+from .storage import db, transcript
+from . import chat
 
-def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
+def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes) -> Union[str, None]:
     """
-    Handles the encrypted registration or login message (Req 2.2.4).
+    Handles encrypted registration or login (Req 2.2.4).
+    Returns the username on successful login, None otherwise.
     """
     print("[Server] Waiting for encrypted credentials...")
     encrypted_data = protocol.receive_message(conn)
@@ -25,16 +29,15 @@ def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
         print(f"[Server] Decrypted data: {data}")
     except Exception as e:
         print(f"[Server] Failed to decrypt/parse credentials: {e}")
-        # Send encrypted error response
         err_msg = protocol.StatusMessage(success=False, message="Decryption failed")
         encrypted_response = aes.encrypt(temp_aes_key, err_msg.model_dump_json().encode('utf-8'))
         protocol.send_message(conn, encrypted_response)
-        return
+        return None
 
     # 2. Process the message
+    username = data.get('username') # Get username for return
     try:
         if data.get('type') == 'register':
-            # 3. Handle Registration (Req 2.2.5)
             model = protocol.SecureRegister(**data)
             db.register_user(model.email, model.username, model.password)
             response = protocol.StatusMessage(
@@ -42,7 +45,6 @@ def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
                 message=f"User {model.username} registered successfully."
             )
         elif data.get('type') == 'login':
-            # 4. Handle Login (Req 2.2.6)
             model = protocol.SecureLogin(**data)
             login_ok = db.verify_login(model.username, model.password)
             
@@ -51,20 +53,14 @@ def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
                     success=True,
                     message=f"User {model.username} logged in successfully."
                 )
-                # Send the login success message *before* starting Phase 3
+                
+                # Send login success *before* Phase 3
                 encrypted_response = aes.encrypt(temp_aes_key, response.model_dump_json().encode('utf-8'))
                 protocol.send_message(conn, encrypted_response)
                 print(f"[Server] Sent encrypted status response (login OK).")
-
-                # Now, perform the Phase 3 session key exchange
-                session_key = handle_session_key_exchange(conn)
                 
-                # TODO: Phase 4 (Chat) will start here, using session_key
-                print("[Server] Ready for encrypted chat.")
-                return # Exit function for now
-                # --------------------------------------------------
-                # --- END OF PHASE 3 CODE ---
-                # --------------------------------------------------
+                # --- SUCCESS: Return username ---
+                return model.username 
             else:
                 response = protocol.StatusMessage(
                     success=False,
@@ -77,19 +73,11 @@ def handle_secure_credentials(conn: socket.socket, temp_aes_key: bytes):
         print(f"[Server] Error processing credentials: {e}")
         response = protocol.StatusMessage(success=False, message=str(e))
 
-    # 5. Send encrypted response (Req 2.2.7)
-    # This now only runs for registration or failed login
-    
-    # --- ADD THIS 'if' ---
-    if not (data.get('type') == 'login' and response.success):
-        encrypted_response = aes.encrypt(temp_aes_key, response.model_dump_json().encode('utf-8'))
-        protocol.send_message(conn, encrypted_response)
-        print(f"[Server] Sent encrypted status response.")
-    # 5. Send encrypted response (Req 2.2.7)
+    # 5. Send encrypted response (for register or failed login)
     encrypted_response = aes.encrypt(temp_aes_key, response.model_dump_json().encode('utf-8'))
     protocol.send_message(conn, encrypted_response)
     print(f"[Server] Sent encrypted status response.")
-
+    return None # No successful login
 
 def handle_temp_dh_exchange(conn: socket.socket) -> bytes:
     """
@@ -151,60 +139,87 @@ def handle_session_key_exchange(conn: socket.socket) -> bytes:
 
 def handle_client(conn: socket.socket):
     """
-    Handles a single client connection, from auth to login.
+    Handles a single client connection, from auth to login to chat.
     """
     temp_aes_key = None
+    session_key = None
+    client_username = None
+    
     try:
         print(f"\n[Server] New client connected from {conn.getpeername()}.")
         
-        # --- PHASE 2A: Mutual Authentication (Req 2.1) ---
+        # 1. Load all server certs/keys
         ca_cert = pki.load_ca_cert()
         server_cert = pki.load_certificate("server.crt")
+        server_key = pki.load_private_key("server.key")
         
+        # --- PHASE 2A: Mutual Authentication (Req 2.1) ---
+        # 1. SERVER SENDS FIRST
         print("[Server] Sending server certificate...")
         protocol.send_message(conn, pki.serialize_cert(server_cert))
 
+        # 2. SERVER RECEIVES SECOND
         print("[Server] Waiting for client certificate...")
         client_cert_pem = protocol.receive_message(conn)
+        
         if not client_cert_pem:
-            print("[Server] Client disconnected.")
-            return
+            return # Client disconnected
 
         client_cert = pki.deserialize_cert(client_cert_pem)
         pki.validate_certificate(client_cert, ca_cert, expected_cn="client")
         print("\n[Server] Mutual Authentication Successful!")
         
-        # Send auth success message to signal next phase
-        auth_success_msg = protocol.AuthSuccessMessage(
-            message="Mutual auth OK. Ready for DH."
-        )
+        auth_success_msg = protocol.AuthSuccessMessage(message="Mutual auth OK. Ready for DH.")
         protocol.send_json_message(conn, auth_success_msg)
 
         # --- PHASE 2B: Secure Credentials (Req 2.2) ---
-        
-        # 1. Perform temporary DH exchange
         temp_aes_key = handle_temp_dh_exchange(conn)
         
-        # 2. Handle encrypted registration/login
-        handle_secure_credentials(conn, temp_aes_key)
+        # Add a small delay to prevent a race condition
+        time.sleep(0.1) 
+        
+        # This function now returns the client's username on success
+        client_username = handle_secure_credentials(conn, temp_aes_key)
         
         # --- PHASE 3: Session Key (Req 2.3) ---
-        # TODO: This will be implemented next.
-        
+        if client_username: # Only if login was successful
+            session_key = handle_session_key_exchange(conn)
+            
+            # --- PHASE 4: Chat (Req 2.4) ---
+            print(f"[Server] Starting chat session for {client_username}...")
+            
+            # 1. Initialize transcript
+            server_transcript = transcript.Transcript(
+                username=client_username,
+                role="server"
+            )
+            
+            # 2. Initialize chat session
+            chat_session = chat.ChatSession(
+                sock=conn,
+                session_key=session_key,
+                my_username="server", # Server is just "server"
+                my_private_key=server_key,
+                peer_username=client_username,
+                peer_certificate=client_cert,
+                transcript=server_transcript
+            )
+            
+            # 3. Start chat (this blocks until chat ends)
+            chat_session.start()
 
     except Exception as e:
         print(f"[Server] Error handling client: {e}")
-        # If we have an AES key, try to send an encrypted error
-        if temp_aes_key and not conn._closed:
-            try:
+        if temp_aes_key and not session_key and not conn._closed:
+             try:
                 err_msg = protocol.StatusMessage(success=False, message=str(e))
                 encrypted_response = aes.encrypt(temp_aes_key, err_msg.model_dump_json().encode('utf-8'))
                 protocol.send_message(conn, encrypted_response)
-            except Exception as e_inner:
+             except Exception as e_inner:
                 print(f"[Server] Failed to send final error: {e_inner}")
         
     finally:
-        print("[Server] Closing client connection.")
+        print(f"[Server] Closing client connection for {client_username or 'peer'}.")
         conn.close()
 
 def main():

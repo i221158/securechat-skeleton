@@ -80,7 +80,7 @@ class StatusMessage(BaseModel):
     success: bool
     message: str
 
-    
+#phase 4
 class ChatMessage(BaseModel):
     """
     Client <-> Server message for an encrypted chat message.
@@ -91,7 +91,15 @@ class ChatMessage(BaseModel):
     ts: int        # Timestamp (milliseconds)
     ct: str        # Base64-encoded AES-128 ciphertext
     sig: str       # Base64-encoded RSA signature
-
+#phase 5
+class SessionReceiptMessage(BaseModel):
+    """
+    Client <-> Server message to exchange the final session receipt.
+    (Req 2.5.ii)
+    """
+    type: str = "receipt"
+    sig: str# Base64-encoded signature of the TranscriptHash
+      
 # --- Network Helper Functions (Unchanged) ---
 # (Your existing send_message, receive_message, 
 #  send_json_message, and receive_json_message functions go here)
@@ -108,25 +116,35 @@ def send_message(sock: socket.socket, message_bytes: bytes):
 def receive_message(sock: socket.socket) -> Union[bytes, None]:
     """Reads 4-byte length prefix and returns the raw bytes message."""
     try:
+        # Read the 4-byte length prefix
         message_len_bytes = sock.recv(4)
         if not message_len_bytes:
             print("Connection closed by peer (no length).")
             return None
         message_len = int.from_bytes(message_len_bytes, 'big')
 
+        # Read the full message
         message_data = b""
         while len(message_data) < message_len:
             chunk = sock.recv(message_len - len(message_data))
             if not chunk:
                 print("Connection closed by peer (incomplete message).")
-                return None
-            message_data += chunk
+                return None  # Connection lost
         
         return message_data
+    
+    except socket.timeout:
+        # --- THIS IS THE FIX ---
+        # A timeout is normal. Re-raise it so the
+        # chat.py loop can catch it and 'continue'.
+        raise
+    
     except socket.error as e:
+        # Handle other, real socket errors
         print(f"Socket error while receiving: {e}")
         return None
-
+    
+    
 def send_json_message(sock: socket.socket, message: BaseModel):
     """Serializes a Pydantic model to JSON and sends it."""
     json_bytes = message.model_dump_json().encode('utf-8')
