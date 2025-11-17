@@ -3,7 +3,6 @@
 """
 Implements the main, threaded, encrypted chat loop (Req 2.4 & 2.5).
 """
-
 import socket
 import sys
 import threading
@@ -166,13 +165,11 @@ class ChatSession:
                     receipt_msg = protocol.SessionReceiptMessage(**json_data)
                     print(f"\n--- PEER RECEIPT (for verifier) ---\n{receipt_msg.sig}\n")
                     self.stop_event.set()
-                    
             except socket.timeout:
                 continue # Loop back to check stop_event
             except Exception as e:
                 print(f"\r[Chat Error] {e}")
                 self.stop_event.set()
-                
         print("[Chat] Network listener stopped.")
 
     def _user_input_thread(self):
